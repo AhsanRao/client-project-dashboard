@@ -223,7 +223,7 @@ def fetch_all_data_with_limits():
             progress_value = min(current_step / total_steps, 1.0)
             progress_bar.progress(progress_value)
 
-            time.sleep(2)  # CoinGecko rate limit
+            time.sleep(30)  # CoinGecko rate limit
             
             try:
                 comprehensive_data = fetch_coingecko_comprehensive_data(config['coingecko_id'])
