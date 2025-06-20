@@ -379,7 +379,7 @@ def fetch_all_data_with_limits():
             progress_value = min(current_step / total_steps, 1.0)
             progress_bar.progress(progress_value)
 
-            time.sleep(1)
+            time.sleep(30)
         
         # DefiLlama data
         if config.get('defillama_slug'):
@@ -413,7 +413,7 @@ def fetch_all_data_with_limits():
             progress_value = min(current_step / total_steps, 1.0)
             progress_bar.progress(progress_value)
 
-            time.sleep(0.5)
+            time.sleep(10)
         
         # NFT data
         if config.get('nft_contract'):
@@ -456,37 +456,37 @@ def fetch_all_data_with_limits():
             
             current_step += 1
             progress_bar.progress(min(current_step / total_steps, 1.0))
-            time.sleep(10)  # Rate limiting
+            time.sleep(30)  # Rate limiting
         
         # Additional DeFi governance data
-        if config.get('defillama_slug'):
-            try:
-                governance_data = fetch_defi_governance_data(config['defillama_slug'])
-                save_data_to_db(client_name, 'governance', governance_data)
-                total_apis_called += 1
-                if not governance_data.get('success'):
-                    errors_count += 1
-            except Exception as e:
-                logger.error(f"Error fetching governance data for {client_name}: {e}")
-                errors_count += 1
+        # if config.get('defillama_slug'):
+        #     try:
+        #         governance_data = fetch_defi_governance_data(config['defillama_slug'])
+        #         save_data_to_db(client_name, 'governance', governance_data)
+        #         total_apis_called += 1
+        #         if not governance_data.get('success'):
+        #             errors_count += 1
+        #     except Exception as e:
+        #         logger.error(f"Error fetching governance data for {client_name}: {e}")
+        #         errors_count += 1
             
-            current_step += 1
-            progress_bar.progress(min(current_step / total_steps, 1.0))
-            time.sleep(1)
+        #     current_step += 1
+        #     progress_bar.progress(min(current_step / total_steps, 1.0))
+        #     time.sleep(1)
         
         # Social metrics
-        try:
-            social_data = fetch_protocol_social_metrics(client_name)
-            save_data_to_db(client_name, 'social', social_data)
-            total_apis_called += 1
-            if not social_data.get('success'):
-                errors_count += 1
-        except Exception as e:
-            logger.error(f"Error fetching social data for {client_name}: {e}")
-            errors_count += 1
+        # try:
+        #     social_data = fetch_protocol_social_metrics(client_name)
+        #     save_data_to_db(client_name, 'social', social_data)
+        #     total_apis_called += 1
+        #     if not social_data.get('success'):
+        #         errors_count += 1
+        # except Exception as e:
+        #     logger.error(f"Error fetching social data for {client_name}: {e}")
+        #     errors_count += 1
         
-        current_step += 1
-        progress_bar.progress(min(current_step / total_steps, 1.0))
+        # current_step += 1
+        # progress_bar.progress(min(current_step / total_steps, 1.0))
         time.sleep(1)
 
     
