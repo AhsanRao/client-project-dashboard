@@ -12,12 +12,15 @@ import logging
 
 # Import the API functions
 from data_fetcher import (
+    fetch_coingecko_historical_data,
+    fetch_defi_governance_data,
     fetch_kaito_mindshare_data,
     fetch_kaito_engagement_data,
     fetch_coingecko_price_data,
     fetch_coingecko_comprehensive_data,
     fetch_defillama_protocol_data,
     fetch_defillama_yields_data,
+    fetch_protocol_social_metrics,
     fetch_reservoir_nft_stats
 )
 from config import CLIENTS
@@ -156,6 +159,143 @@ def get_fetch_history() -> pd.DataFrame:
     conn.close()
     return df
 
+def init_historical_tables():
+    """Initialize historical data tables"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Historical price data table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_name TEXT NOT NULL,
+        coin_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        price_usd REAL NOT NULL,
+        volume_24h REAL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(client_name, coin_id, timestamp)
+    )
+    """)
+    
+    # Optimized indexes for time series queries
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_client_time ON price_history(client_name, timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_coin_time ON price_history(coin_id, timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_timestamp ON price_history(timestamp)")
+    
+    conn.commit()
+    conn.close()
+
+def save_historical_data(client_name: str, coin_id: str, historical_data: List[Dict]):
+    """Save historical price data to database"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Prepare data for batch insertion
+    data_to_insert = [
+        (client_name, coin_id, point['timestamp'], point['price'], point['volume_24h'])
+        for point in historical_data
+    ]
+    
+    cursor.execute("BEGIN TRANSACTION")
+    cursor.executemany("""
+        INSERT OR REPLACE INTO price_history 
+        (client_name, coin_id, timestamp, price_usd, volume_24h)
+        VALUES (?, ?, ?, ?, ?)
+    """, data_to_insert)
+    cursor.execute("COMMIT")
+    conn.close()
+
+def get_historical_data(client_names: List[str] = None, days: int = 30) -> pd.DataFrame:
+    """Get historical price data from database"""
+    conn = sqlite3.connect(DB_NAME)
+    
+    # Calculate timestamp cutoff
+    cutoff_timestamp = int((datetime.now() - timedelta(days=days)).timestamp())
+    
+    query = """
+    SELECT client_name, coin_id, timestamp, price_usd, volume_24h
+    FROM price_history 
+    WHERE timestamp >= ?
+    """
+    params = [cutoff_timestamp]
+    
+    if client_names:
+        placeholders = ','.join('?' * len(client_names))
+        query += f" AND client_name IN ({placeholders})"
+        params.extend(client_names)
+    
+    query += " ORDER BY client_name, timestamp"
+    
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+    
+    # Convert timestamp to datetime
+    if not df.empty:
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+    
+    return df
+
+def create_historical_price_chart(historical_df: pd.DataFrame, chart_type: str = "absolute") -> go.Figure:
+    """Create interactive historical price comparison chart"""
+    fig = go.Figure()
+    
+    if historical_df.empty:
+        return fig
+    
+    clients = historical_df['client_name'].unique()
+    
+    for client in clients:
+        client_data = historical_df[historical_df['client_name'] == client].copy()
+        client_data = client_data.sort_values('datetime')
+        
+        if chart_type == "normalized":
+            # Normalize to percentage returns from start
+            if len(client_data) > 0:
+                start_price = client_data['price_usd'].iloc[0]
+                client_data['normalized_price'] = (client_data['price_usd'] / start_price - 1) * 100
+                y_values = client_data['normalized_price']
+                y_title = "Price Change (%)"
+                hover_template = f"{client}: %{{y:+.2f}}%<br>%{{x}}<extra></extra>"
+            else:
+                continue
+        else:
+            y_values = client_data['price_usd']
+            y_title = "Price (USD)"
+            hover_template = f"{client}: $%{{y:,.4f}}<br>%{{x}}<extra></extra>"
+        
+        fig.add_trace(go.Scatter(
+            x=client_data['datetime'],
+            y=y_values,
+            name=client,
+            mode='lines',
+            hovertemplate=hover_template,
+            line=dict(width=2)
+        ))
+    
+    fig.update_layout(
+        title=f"{'Normalized ' if chart_type == 'normalized' else ''}Price Comparison",
+        xaxis_title="Date",
+        yaxis_title=y_title,
+        hovermode='x unified',
+        height=500,
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=7, label="7D", step="day", stepmode="backward"),
+                    dict(count=30, label="30D", step="day", stepmode="backward"),
+                    dict(count=90, label="90D", step="day", stepmode="backward"),
+                    dict(step="all")
+                ])
+            ),
+            rangeslider=dict(visible=True, thickness=0.1),
+            type="date"
+        ),
+        showlegend=True
+    )
+    
+    return fig
+
 def fetch_all_data_with_limits():
     """Fetch data for all clients with API limit handling"""
     fetch_start = time.time()
@@ -290,6 +430,64 @@ def fetch_all_data_with_limits():
             current_step += 1
             progress_value = min(current_step / total_steps, 1.0)
             progress_bar.progress(progress_value)
+        
+        time.sleep(30)  # Rate limiting
+
+        # Historical price data
+        if config.get('coingecko_id'):
+            try:
+                historical_data = fetch_coingecko_historical_data(config['coingecko_id'], days=30)
+                save_data_to_db(client_name, 'historical', historical_data)
+                
+                # Save to historical table
+                if historical_data.get('success') and historical_data['data'].get('historical_prices'):
+                    save_historical_data(
+                        client_name, 
+                        config['coingecko_id'],
+                        historical_data['data']['historical_prices']
+                    )
+                
+                total_apis_called += 1
+                if not historical_data.get('success'):
+                    errors_count += 1
+            except Exception as e:
+                logger.error(f"Error fetching historical data for {client_name}: {e}")
+                errors_count += 1
+            
+            current_step += 1
+            progress_bar.progress(min(current_step / total_steps, 1.0))
+            time.sleep(10)  # Rate limiting
+        
+        # Additional DeFi governance data
+        if config.get('defillama_slug'):
+            try:
+                governance_data = fetch_defi_governance_data(config['defillama_slug'])
+                save_data_to_db(client_name, 'governance', governance_data)
+                total_apis_called += 1
+                if not governance_data.get('success'):
+                    errors_count += 1
+            except Exception as e:
+                logger.error(f"Error fetching governance data for {client_name}: {e}")
+                errors_count += 1
+            
+            current_step += 1
+            progress_bar.progress(min(current_step / total_steps, 1.0))
+            time.sleep(1)
+        
+        # Social metrics
+        try:
+            social_data = fetch_protocol_social_metrics(client_name)
+            save_data_to_db(client_name, 'social', social_data)
+            total_apis_called += 1
+            if not social_data.get('success'):
+                errors_count += 1
+        except Exception as e:
+            logger.error(f"Error fetching social data for {client_name}: {e}")
+            errors_count += 1
+        
+        current_step += 1
+        progress_bar.progress(min(current_step / total_steps, 1.0))
+        time.sleep(1)
 
     
     # Save fetch history
@@ -379,6 +577,7 @@ def get_logo_url(client_name: str, all_data: pd.DataFrame) -> Optional[str]:
 def main():
     # Initialize database
     init_database()
+    # init_historical_tables()
     
     # Header
     st.title("🚀 Client Project Data Dashboard")
@@ -415,8 +614,9 @@ def main():
         )
     
     # Main content
-    tabs = st.tabs(["📊 Overview", "💰 Price & Market", "🔗 DeFi Metrics", 
-                    "📈 Social & Mindshare", "🎨 NFT Data", "📉 Comparisons"])
+    tabs = st.tabs(["📊 Overview", "📈 Historical Prices", "💰 Price & Market", 
+                    "🔗 DeFi Metrics", "📈 Social & Mindshare", "🎨 NFT Data", 
+                    "📉 Comparisons"])
     
     # Get latest data
     all_data = get_latest_data()
@@ -458,7 +658,7 @@ def main():
                             if not price_row.empty and price_row.iloc[0]['success']:
                                 price_data = price_row.iloc[0]['data']
                                 st.metric(
-                                    "Price",
+                                    "Price (24h)",
                                     f"${price_data.get('price', 0):.4f}",
                                     f"{(price_data.get('price_change_24h') or 0):.2f}%"
                                 )
@@ -489,7 +689,82 @@ def main():
                         
                         st.divider()
     
-    with tabs[1]:  # Price & Market
+    with tabs[1]:  # Historical Prices
+        st.header("Historical Price Analysis")
+        
+        # Time range selection
+        col1, col2, col3 = st.columns([2, 2, 2])
+        
+        with col1:
+            days_range = st.selectbox(
+                "Time Range",
+                options=[7, 30, 90, 365],
+                index=1,  # Default to 30 days
+                format_func=lambda x: f"{x} days"
+            )
+        
+        with col2:
+            chart_type = st.selectbox(
+                "Chart Type",
+                options=["absolute", "normalized"],
+                format_func=lambda x: "Absolute Prices" if x == "absolute" else "Normalized (%)"
+            )
+        
+        with col3:
+            if st.button("📊 Update Historical Data", type="secondary"):
+                with st.spinner("Fetching historical data..."):
+                    for client_name, config in CLIENTS.items():
+                        if config.get('coingecko_id'):
+                            historical_data = fetch_coingecko_historical_data(config['coingecko_id'], days=days_range)
+                            if historical_data.get('success'):
+                                save_historical_data(
+                                    client_name,
+                                    config['coingecko_id'],
+                                    historical_data['data']['historical_prices']
+                                )
+                st.success("Historical data updated!")
+        
+        # Get historical data
+        historical_df = get_historical_data(selected_clients, days=days_range)
+        
+        if not historical_df.empty:
+            # Create and display historical chart
+            hist_chart = create_historical_price_chart(historical_df, chart_type)
+            st.plotly_chart(hist_chart, use_container_width=True)
+            
+            # Historical data summary
+            st.subheader("Price Performance Summary")
+            
+            summary_data = []
+            for client in selected_clients:
+                client_data = historical_df[historical_df['client_name'] == client]
+                if not client_data.empty:
+                    client_data = client_data.sort_values('datetime')
+                    start_price = client_data['price_usd'].iloc[0]
+                    end_price = client_data['price_usd'].iloc[-1]
+                    change_pct = ((end_price - start_price) / start_price) * 100
+                    max_price = client_data['price_usd'].max()
+                    min_price = client_data['price_usd'].min()
+                    avg_volume = client_data['volume_24h'].mean()
+                    
+                    summary_data.append({
+                        'Token': client,
+                        'Start Price': f"${start_price:.4f}",
+                        'End Price': f"${end_price:.4f}",
+                        'Change %': f"{change_pct:+.2f}%",
+                        'High': f"${max_price:.4f}",
+                        'Low': f"${min_price:.4f}",
+                        'Avg Volume': f"${avg_volume:,.0f}"
+                    })
+            
+            if summary_data:
+                summary_df = pd.DataFrame(summary_data)
+                st.dataframe(summary_df, use_container_width=True)
+        else:
+            st.info("No historical data available. Click 'Update Historical Data' to fetch data.")
+
+    
+    with tabs[2]:  # Price & Market
         st.header("Price & Market Data")
         
         price_data_dict = {}
@@ -535,7 +810,7 @@ def main():
             fig = create_comparison_chart("24h Volume ($)", volume_dict, "24h Trading Volume Comparison")
             st.plotly_chart(fig, use_container_width=True)
     
-    with tabs[2]:  # DeFi Metrics
+    with tabs[3]:  # DeFi Metrics
         st.header("DeFi Protocol Metrics")
         
         tvl_dict = {}
@@ -581,7 +856,7 @@ def main():
             })
             st.dataframe(defi_df, use_container_width=True)
     
-    with tabs[3]:  # Social & Mindshare
+    with tabs[4]:  # Social & Mindshare
         st.header("Social & Mindshare Metrics")
         
         mindshare_dict = {}
@@ -643,7 +918,7 @@ def main():
                     fig.update_layout(height=200)
                     st.plotly_chart(fig, use_container_width=True)
     
-    with tabs[4]:  # NFT Data
+    with tabs[5]:  # NFT Data
         st.header("NFT Collection Data")
         
         nft_clients = [c for c in selected_clients if CLIENTS[c].get('nft_contract')]
@@ -671,7 +946,7 @@ def main():
                     with col4:
                         st.metric("Total Supply", f"{float(data.get('token_count', 0)):,}")
     
-    with tabs[5]:  # Comparisons
+    with tabs[6]:  # Comparisons
         st.header("Multi-Client Comparisons")
         
         # Prepare normalized data for radar chart

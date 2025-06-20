@@ -286,6 +286,151 @@ def fetch_reservoir_nft_stats(collection_address: str) -> Dict[str, Any]:
     
     return {'success': False, 'data': None, 'error': 'No collection data found'}
 
+def fetch_coingecko_historical_data(coin_id: str, days: int = 30) -> Dict[str, Any]:
+    """Fetch historical price data from CoinGecko"""
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {
+        'vs_currency': 'usd',
+        'days': days,
+        # 'interval': 'hourly' if days <= 90 else 'daily'
+    }
+    headers = {
+        'accept': 'application/json',
+        'x-cgecko-api-key': 'CG-XgL2xMNsiZrmPZTJbNPX75ut'	
+    }
+    
+    result = make_request(url, params)
+    if not result['success']:
+        return result
+    
+    data = result['data']
+    prices = data.get('prices', [])
+    volumes = data.get('total_volumes', [])
+    
+    # Format data for storage
+    historical_data = []
+    for i, price_point in enumerate(prices):
+        timestamp = price_point[0] // 1000  # Convert to Unix timestamp
+        price = price_point[1]
+        volume = volumes[i][1] if i < len(volumes) else 0
+        
+        historical_data.append({
+            'timestamp': timestamp,
+            'price': price,
+            'volume_24h': volume
+        })
+    
+    return {
+        'success': True,
+        'data': {
+            'coin_id': coin_id,
+            'historical_prices': historical_data,
+            'days_range': days,
+            'data_points': len(historical_data)
+        },
+        'error': None
+    }
+
+def fetch_defi_governance_data(protocol_slug: str) -> Dict[str, Any]:
+    """Fetch governance and additional DeFi metrics from free sources"""
+    # Using DeFiLlama's free governance endpoint
+    governance_url = f"https://api.llama.fi/governance/{protocol_slug}"
+    
+    result = make_request(governance_url)
+    governance_data = {}
+    
+    if result['success']:
+        data = result['data']
+        governance_data = {
+            'total_proposals': len(data.get('proposals', [])),
+            'active_proposals': len([p for p in data.get('proposals', []) if p.get('state') == 'active']),
+            'voter_count': data.get('voterCount', 0),
+            'treasury_value': data.get('treasuryValue', 0)
+        }
+    
+    # Get additional yield farming data
+    yield_url = "https://yields.llama.fi/pools"
+    yield_result = make_request(yield_url)
+    
+    additional_metrics = {}
+    if yield_result['success']:
+        all_pools = yield_result['data'].get('data', [])
+        protocol_pools = [p for p in all_pools if protocol_slug.lower() in p.get('project', '').lower()]
+        
+        if protocol_pools:
+            total_tvl = sum(p.get('tvlUsd', 0) for p in protocol_pools)
+            avg_apy = sum(p.get('apy', 0) for p in protocol_pools) / len(protocol_pools)
+            max_apy = max(p.get('apy', 0) for p in protocol_pools)
+            
+            additional_metrics = {
+                'farming_tvl': total_tvl,
+                'avg_farm_apy': avg_apy,
+                'max_farm_apy': max_apy,
+                'farm_pools_count': len(protocol_pools),
+                'stable_pools': len([p for p in protocol_pools if p.get('stablecoin', False)]),
+                'il_risk_pools': len([p for p in protocol_pools if not p.get('stablecoin', False)])
+            }
+    
+    return {
+        'success': True,
+        'data': {
+            **governance_data,
+            **additional_metrics
+        },
+        'error': None
+    }
+
+def fetch_protocol_social_metrics(protocol_name: str) -> Dict[str, Any]:
+    """Fetch social metrics from multiple free sources"""
+    # Using CoinGecko's free social data
+    search_url = "https://api.coingecko.com/api/v3/search"
+    search_params = {'query': protocol_name}
+    
+    search_result = make_request(search_url, search_params)
+    if not search_result['success']:
+        return {'success': False, 'data': None, 'error': 'Search failed'}
+    
+    # Try to find the protocol in search results
+    coins = search_result['data'].get('coins', [])
+    target_coin = None
+    
+    for coin in coins:
+        if protocol_name.lower() in coin.get('name', '').lower():
+            target_coin = coin
+            break
+    
+    if not target_coin:
+        return {'success': False, 'data': None, 'error': 'Protocol not found'}
+    
+    # Get detailed coin data
+    coin_id = target_coin['id']
+    coin_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+    
+    coin_result = make_request(coin_url)
+    if not coin_result['success']:
+        return coin_result
+    
+    coin_data = coin_result['data']
+    community = coin_data.get('community_data', {})
+    developer = coin_data.get('developer_data', {})
+    
+    return {
+        'success': True,
+        'data': {
+            'twitter_followers': community.get('twitter_followers', 0),
+            'reddit_subscribers': community.get('reddit_subscribers', 0),
+            'reddit_active_users': community.get('reddit_accounts_active_48h', 0),
+            'telegram_users': community.get('telegram_users', 0),
+            'github_forks': developer.get('forks', 0),
+            'github_stars': developer.get('stars', 0),
+            'github_subscribers': developer.get('subscribers', 0),
+            'github_commits_4w': developer.get('github_commits_4w', 0),
+            'developer_score': coin_data.get('developer_score', 0),
+            'community_score': coin_data.get('community_score', 0)
+        },
+        'error': None
+    }
+
 # ============================================================================
 # CONVENIENCE FUNCTIONS
 # ============================================================================
@@ -295,30 +440,46 @@ def fetch_all_protocol_data(protocol_name: str, config: Dict[str, Any]) -> Dict[
     all_data = {}
     
     # Kaito data
-    if config.get('kaito_ticker'):
-        mindshare = fetch_kaito_mindshare_data(config['kaito_ticker'])
-        engagement = fetch_kaito_engagement_data(config['kaito_ticker'])
-        all_data['mindshare'] = mindshare
-        all_data['engagement'] = engagement
+    # if config.get('kaito_ticker'):
+    #     mindshare = fetch_kaito_mindshare_data(config['kaito_ticker'])
+    #     engagement = fetch_kaito_engagement_data(config['kaito_ticker'])
+    #     all_data['mindshare'] = mindshare
+    #     all_data['engagement'] = engagement
     
-    # CoinGecko data
+    # # CoinGecko data
+    # if config.get('coingecko_id'):
+    #     price = fetch_coingecko_price_data(config['coingecko_id'])
+    #     comprehensive = fetch_coingecko_comprehensive_data(config['coingecko_id'])
+    #     all_data['price'] = price
+    #     all_data['comprehensive'] = comprehensive
+    
+    # # DefiLlama data
+    # if config.get('defillama_slug'):
+    #     protocol = fetch_defillama_protocol_data(config['defillama_slug'])
+    #     yields = fetch_defillama_yields_data(config['defillama_slug'])
+    #     all_data['protocol'] = protocol
+    #     all_data['yields'] = yields
+    
+    # # NFT data
+    # if config.get('nft_contract'):
+    #     nft = fetch_reservoir_nft_stats(config['nft_contract'])
+    #     all_data['nft'] = nft
+    import time
     if config.get('coingecko_id'):
-        price = fetch_coingecko_price_data(config['coingecko_id'])
-        comprehensive = fetch_coingecko_comprehensive_data(config['coingecko_id'])
-        all_data['price'] = price
-        all_data['comprehensive'] = comprehensive
+        historical_data = fetch_coingecko_historical_data(config['coingecko_id'], days=30)
+
+        time.sleep(1)  # Rate limiting
     
-    # DefiLlama data
+    # NEW: Additional DeFi governance data
     if config.get('defillama_slug'):
-        protocol = fetch_defillama_protocol_data(config['defillama_slug'])
-        yields = fetch_defillama_yields_data(config['defillama_slug'])
-        all_data['protocol'] = protocol
-        all_data['yields'] = yields
+        governance_data = fetch_defi_governance_data(config['defillama_slug'])   
+        time.sleep(0.5)
     
-    # NFT data
-    if config.get('nft_contract'):
-        nft = fetch_reservoir_nft_stats(config['nft_contract'])
-        all_data['nft'] = nft
+        # NEW: Social metrics
+        social_data = fetch_protocol_social_metrics(config['coingecko_id'])
+    all_data['governance'] = governance_data
+    all_data['social'] = social_data
+    all_data['historical'] = historical_data
     
     return all_data
 
