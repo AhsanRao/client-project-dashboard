@@ -10,6 +10,18 @@ from plotly.subplots import make_subplots
 from typing import Dict, Any, List, Optional
 import logging
 
+# Hardcoded password for dashboard access
+PASSWORD = "apc@2025"
+
+# Password protection
+def password_protect():
+    st.markdown("## 🔒 Enter Password to Access Dashboard")
+    password = st.text_input("Password", type="password")
+    if password != PASSWORD:
+        st.warning("Incorrect password. Please try again.")
+        st.stop()
+
+
 # Import the API functions
 from data_fetcher import (
     fetch_coingecko_historical_data,
@@ -575,6 +587,8 @@ def get_logo_url(client_name: str, all_data: pd.DataFrame) -> Optional[str]:
     return None
 
 def main():
+    # Password protection
+    password_protect()
     # Initialize database
     init_database()
     # init_historical_tables()
